@@ -1,0 +1,345 @@
+/-!
+# STOG–MetaMorph 论文五个命题的 Lean 4 形式化（v3 修订版）
+## （纯 Lean 4 core，无 Mathlib，适配 https://lean.math.hhu.de）
+
+本文件 `import` 任何东西都不需要：不引公理、不用 `sorry`，全部证明闭合。
+
+## v3 修订说明
+
+论文 v3 将原 "Theorem 1–5" 更名为 **Proposition P1–P5** 并附显式假设集；本文件在
+注释与文档字符串层面对齐该命名（Lean 声明名保持不变以保证兼容）。v3 的经验状态注记：
+
+* **P4（门控最优性 / 幅度驱动收益）**：限定形式在幅度平衡实验下被经验证伪
+  （E4 v4：幅度比平衡到 1.026 后 oracle 收益由 0.61 降至 0.007；v3 的收益完全由
+  6.53× 幅度差驱动）。此处证明的离散内核不依赖幅度假设，仍然成立；幅度相关假设
+  在 P4 节头部显式记录。
+* **P5 的几何子条款（论文 5a/5b）**：经验证伪，已降级至补充材料（SI）。本文件仅
+  形式化第 (iii) 条（Hedge / 自然梯度动力学），该条保留于正文。
+* **Conjecture C1（归因–干预秩一致性）**：v3 新增，经验证伪（Spearman ρ = −0.105）。
+  在文件末尾仅以 `def` 形式记录其陈述（不是定理，不声称证明，也不引入 `sorry`）。
+
+## 范围说明
+
+论文五个命题的完整分析学陈述涉及谱测度、Parseval 恒等式、Toeplitz 特征值
+交错、影响函数微积分、Shahshahani 度量下的自然梯度流。这些对象在 Lean 4
+core 中不存在（core 甚至没有实数 ℝ），在该在线环境中无法直接书写。
+因此本文件形式化的是每个命题**证明草图中真正承担推理负荷的数学内核**：
+
+* P1  两两正交 ⇒ 能量可加（"noise cross-terms vanish by orthogonality"）
+* P2  单调谱加权 ⇒ 条件数收缩，且收缩随谱衰减指数增强
+* P3  原始线性读数的影响函数无界 vs Huber/中位数型聚合的影响函数有界
+* P4  Bayes 门控最优；可实行门控的超额风险 = 误分配窗口数 × 风险差
+* P5  乘性权重更新（单纯形上自然梯度流的 Euler 离散化）的正性、
+      不动点性质与赔率（odds）改进
+-/
+
+/-! ============================================================
+## Proposition P1（原 Theorem 1，谱算子风险分解）
+
+论文陈述：R(m, ω) = σ² + ∫|H*−H_m|² dS_ω + 估计误差项。
+证明草图关键步：展开平方损失并用 Parseval，噪声交叉项由正交性消失。
+
+此处在内积空间的公理化结构上证明同一演绎步骤：
+只要失配分量 m、噪声分量 n、估计误差分量 e 两两正交，
+总风险能量严格可加分解。这是"正交 ⇒ 风险分解"的全部代数内容。
+============================================================ -/
+
+/-- 公理化内积结构：P1 的证明只需要两条内积法则。 -/
+structure InnerSpace where
+  Carrier : Type
+  add : Carrier → Carrier → Carrier
+  inner : Carrier → Carrier → Int
+  inner_add_left : ∀ u v w, inner (add u v) w = inner u w + inner v w
+  inner_symm : ∀ u v, inner u v = inner v u
+
+namespace InnerSpace
+
+variable (V : InnerSpace)
+
+/-- 右可加性：由左可加性与对称性推出。 -/
+theorem inner_add_right (u v w : V.Carrier) :
+    V.inner u (V.add v w) = V.inner u v + V.inner u w := by
+  rw [V.inner_symm u (V.add v w), V.inner_add_left v w u,
+      V.inner_symm v u, V.inner_symm w u]
+
+/-- 能量（平方范数）：即论文中各风险项的谱能量。 -/
+def energy (u : V.Carrier) : Int := V.inner u u
+
+/-- 勾股定理：正交 ⇒ 能量可加。
+    对应论文 P1 证明中"交叉项由正交性消失"这一步。 -/
+theorem pythagoras {u w : V.Carrier} (h : V.inner u w = 0) :
+    energy V (V.add u w) = energy V u + energy V w := by
+  have h' : V.inner w u = 0 := by rw [V.inner_symm w u, h]
+  show V.inner (V.add u w) (V.add u w) = V.inner u u + V.inner w w
+  rw [V.inner_add_left u w (V.add u w),
+      V.inner_add_right u u w, V.inner_add_right w u w, h, h']
+  omega
+
+/-- **Proposition P1（风险分解）的代数内核。**
+    失配 m（即 ∫|H*−H_m|²dS 的角色）、噪声 n（即 σ² 的角色）、
+    估计误差 e 两两正交时，总风险 = 三者能量之和。 -/
+theorem risk_decomposition {m n e : V.Carrier}
+    (hmn : V.inner m n = 0) (hme : V.inner m e = 0) (hne : V.inner n e = 0) :
+    energy V (V.add (V.add m n) e)
+      = energy V m + energy V n + energy V e := by
+  have h1 : V.inner (V.add m n) e = 0 := by
+    rw [V.inner_add_left m n e, hme, hne]; omega
+  rw [pythagoras V h1, pythagoras V hmn]
+
+end InnerSpace
+
+/-- 一维具体模型（信号为整数，内积为乘法）：
+    证明上述公理是一致的（模型存在）。 -/
+def intLine : InnerSpace where
+  Carrier := Int
+  add u v := u + v
+  inner u v := u * v
+  inner_add_left u v w := Int.add_mul u v w
+  inner_symm u v := Int.mul_comm u v
+
+/-- 具体模型上的 sanity check：能量就是自乘。 -/
+example (u : Int) : InnerSpace.energy intLine u = u * u := rfl
+
+/-! ============================================================
+## Proposition P2（原 Theorem 2，条件数正则化）
+
+论文陈述：一阶差分对谱做权重 ω ↦ |1−e^{−iω}|² 的重加权，
+该权重随频率单调增；衰减谱把大特征值集中在低频，于是大特征值
+吃到最小的权重，条件数下降，且降幅随衰减指数 α 增大。
+
+代数内核（交叉相乘形式，避免除法）：
+若 λmax ≥ λmin > 0 是条件数定义中的极端特征值，
+权重满足 wLow ≤ wHigh（低频小权重、高频大权重），则
+  κ' = (λmax·wLow)/(λmin·wHigh) ≤ λmax/λmin = κ，
+交叉相乘即  λmax·wLow·λmin ≤ λmax·λmin·wHigh。
+============================================================ -/
+
+/-- **Proposition P2（条件数收缩）**：差分重加权使条件比收缩。 -/
+theorem differencing_contracts_condition_ratio
+    {lambdaMax lambdaMin wLow wHigh : Nat}
+    (_horder : lambdaMin ≤ lambdaMax) (hweights : wLow ≤ wHigh) :
+    lambdaMax * wLow * lambdaMin ≤ lambdaMax * lambdaMin * wHigh := by
+  calc lambdaMax * wLow * lambdaMin
+      = lambdaMax * lambdaMin * wLow := by
+        rw [Nat.mul_assoc, Nat.mul_comm wLow lambdaMin, ← Nat.mul_assoc]
+    _ ≤ lambdaMax * lambdaMin * wHigh := Nat.mul_le_mul_left _ hweights
+
+/-- **Proposition P2（收缩随 α 增强）**：谱衰减越陡（低频权重 wLow 越小），
+    收缩越强。对应论文中 "the reduction grows with the decay exponent"。 -/
+theorem contraction_grows_with_decay
+    {lambdaMax lambdaMin wLow wLow' : Nat}
+    (h : wLow' ≤ wLow) :
+    lambdaMax * wLow' * lambdaMin ≤ lambdaMax * wLow * lambdaMin := by
+  have h1 : wLow' * lambdaMin ≤ wLow * lambdaMin :=
+    Nat.mul_le_mul_right _ h
+  have h2 : lambdaMax * (wLow' * lambdaMin)
+      ≤ lambdaMax * (wLow * lambdaMin) := Nat.mul_le_mul_left _ h1
+  calc lambdaMax * wLow' * lambdaMin
+      = lambdaMax * (wLow' * lambdaMin) := Nat.mul_assoc _ _ _
+    _ ≤ lambdaMax * (wLow * lambdaMin) := h2
+    _ = lambdaMax * wLow * lambdaMin := (Nat.mul_assoc _ _ _).symm
+
+/-- **Proposition P2（严格版）**：权重严格单调且特征值为正时，
+    条件比严格收缩。 -/
+theorem differencing_strictly_contracts
+    {lambdaMax lambdaMin wLow wHigh : Nat}
+    (hmax : 0 < lambdaMax) (hmin : 0 < lambdaMin)
+    (hweights : wLow < wHigh) :
+    lambdaMax * lambdaMin * wLow < lambdaMax * lambdaMin * wHigh := by
+  have h1 : lambdaMax * lambdaMin * (wLow + 1)
+      ≤ lambdaMax * lambdaMin * wHigh := Nat.mul_le_mul_left _ hweights
+  have h2 : lambdaMax * lambdaMin * (wLow + 1)
+      = lambdaMax * lambdaMin * wLow + lambdaMax * lambdaMin := by
+    rw [Nat.left_distrib, Nat.mul_one]
+  rw [h2] at h1
+  have h3 : lambdaMax * lambdaMin * wLow
+      < lambdaMax * lambdaMin * wLow + lambdaMax * lambdaMin := by
+    have hpos : 0 < lambdaMax * lambdaMin := Nat.mul_pos hmax hmin
+    omega
+  exact Nat.lt_of_lt_of_le h3 h1
+
+/-! ============================================================
+## Proposition P3（原 Theorem 3，稳健充分统计）
+
+论文陈述：ε-污染观测律下，原始线性读数的影响函数（IF）在尖峰
+幅度 A 上无界；median、Huber、quantile、median-of-means 的 IF 有界。
+
+这里在 Int 上直接证明这一对照（IF 的定义就是论文中的定义）。
+注：Lean 4 core 没有 `|x|` 记法，故"有界"一律用双边界 `−k ≤ · ≤ k` 陈述：
+* rawIF x = x            —— 无界；
+* huberIF k x = max(−k, min(k, x)) —— 全局被 ±k 界定；
+* med3（三中位数）—— 被样本的最小/最大值界定。
+============================================================ -/
+
+/-- 原始线性读数的影响函数：恒等映射。 -/
+def rawIF (x : Int) : Int := x
+
+/-- Huber 型聚合的影响函数：在 ±k 处截断。 -/
+def huberIF (k : Int) (x : Int) : Int := max (-k) (min k x)
+
+/-- 三中位数（median/quantile 型聚合的最小实例）。 -/
+def med3 (a b c : Int) : Int := max (min a b) (min (max a b) c)
+
+/-- **Proposition P3(a)**：原始读数的 IF 无上界——任意界 B 都会被突破。 -/
+theorem rawIF_unbounded_above (B : Int) : ∃ x : Int, B < rawIF x :=
+  ⟨B + 1, by show B < B + 1; omega⟩
+
+/-- **Proposition P3(a')**：原始读数的 IF 无下界。 -/
+theorem rawIF_unbounded_below (B : Int) : ∃ x : Int, rawIF x < B :=
+  ⟨B - 1, by show B - 1 < B; omega⟩
+
+/-- **Proposition P3(b)**：Huber 型 IF 全局有界（双边界形式）。 -/
+theorem huberIF_bounded {k : Int} (hk : 0 ≤ k) (x : Int) :
+    -k ≤ huberIF k x ∧ huberIF k x ≤ k := by
+  show -k ≤ max (-k) (min k x) ∧ max (-k) (min k x) ≤ k; omega
+
+/-- **Proposition P3(c)**：饱和性——幅度 A ≥ k 的尖峰恰好只被读成 k。
+    即污染幅度再大，影响也不再增长。 -/
+theorem huberIF_saturates {k : Int} (hk : 0 ≤ k) (A : Int) (hA : k ≤ A) :
+    huberIF k A = k := by
+  show max (-k) (min k A) = k; omega
+
+/-- **Proposition P3(d)**：中位数型聚合被样本最小/最大值界定
+    （IF 有界的另一形式）。 -/
+theorem med3_bounded (a b c : Int) :
+    min (min a b) c ≤ med3 a b c ∧ med3 a b c ≤ max (max a b) c := by
+  show min (min a b) c ≤ max (min a b) (min (max a b) c)
+     ∧ max (min a b) (min (max a b) c) ≤ max (max a b) c; omega
+
+/-- **Proposition P3（对照的量化形式）**：无论界 B 多大，
+    总存在一个尖峰幅度使原始读数越界，而 Huber 读数仍然守界。 -/
+theorem robust_vs_raw (B k : Int) (hk : 0 ≤ k) :
+    ∃ A : Int, B < rawIF A ∧ -k ≤ huberIF k A ∧ huberIF k A ≤ k := by
+  refine ⟨max (B + 1) k, ?_, huberIF_bounded hk _⟩
+  show B < max (B + 1) k; omega
+
+/-! ============================================================
+## Proposition P4（原 Theorem 4，区域可分性与门控最优性）
+
+论文陈述：在**幅度平衡假设**下（两体制对损失贡献相当），Bayes 门控是区域后验的
+最优专家选择；任何可实行门控支付的超额风险被 误分配率 × 专家间最大风险差 控制。
+
+**经验状态（v3 修订）**：P4 的限定形式（幅度驱动收益主张）在幅度平衡实验下被
+经验证伪（E4 v4：幅度比平衡到 1.026 后 oracle 收益由 0.61 降至 0.007；v3 的收益
+完全由 6.53× 幅度差驱动）。下面证明的离散内核不依赖幅度假设，仍然成立；
+形式化陈述保留其显式假设。
+
+离散内核（correct + mis 个窗口，每窗口最优风险 rBest，
+误分配窗口每个多付 gap）：
+* Bayes 门控最优：把每个窗口分给低风险专家不劣于任何其他分配；
+* 超额风险恒等式：超额恰为 mis·gap；
+* 由此 超额 ≤ (correct+mis)·gap，即"超额/总量 ≤ gap"（交叉相乘形式）。
+============================================================ -/
+
+/-- **Proposition P4(a)（Bayes 门控最优）**：按最低风险分配不劣于
+    在 mis 个窗口上误分给高风险专家的任何分配。 -/
+theorem bayes_gate_optimal {correct mis rBest rOther : Nat}
+    (h : rBest ≤ rOther) :
+    correct * rBest + mis * rBest
+      ≤ correct * rBest + mis * rOther :=
+  Nat.add_le_add_left (Nat.mul_le_mul_left _ h) _
+
+/-- **Proposition P4(b)（超额风险恒等式）**：可实行门控的总风险
+    = Bayes 总风险 + mis·gap，逐项相等，无隐藏近似。 -/
+theorem gating_excess_risk (correct mis rBest gap : Nat) :
+    correct * rBest + mis * (rBest + gap)
+      = (correct + mis) * rBest + mis * gap := by
+  rw [Nat.left_distrib, Nat.right_distrib]; omega
+
+/-- **Proposition P4(c)（超额风险上界）**：超额风险 mis·gap 不超过
+    总窗口数 × gap——即论文"excess risk ≤ overlap × ΔR"的交叉相乘形式。 -/
+theorem excess_le_overlap_mul_gap (correct mis gap : Nat) :
+    mis * gap ≤ (correct + mis) * gap := by
+  rw [Nat.right_distrib]; exact Nat.le_add_left _ _
+
+/-- **Proposition P4（合并形式）**：任何可实行门控的总风险
+    ≤ Bayes 总风险 + 总窗口数 × gap。 -/
+theorem implementable_gate_bound (correct mis rBest gap : Nat) :
+    correct * rBest + mis * (rBest + gap)
+      ≤ (correct + mis) * rBest + (correct + mis) * gap := by
+  rw [gating_excess_risk, Nat.right_distrib correct mis gap]
+  exact Nat.add_le_add_left (Nat.le_add_left _ _) _
+
+/-! ============================================================
+## Proposition P5（原 Theorem 5，函数空间图册与融合几何）——仅第 (iii) 条
+
+论文陈述（第 (iii) 条，v3 正文保留）：权重自适应是概率单纯形上累积损失的
+自然梯度流，其 Euler 离散化正是指数加权（Hedge / 乘性权重）更新 w ↦ w·s。
+
+**经验状态（v3 修订）**：P5 的几何子条款（论文 5a/5b——图册与融合几何主张）
+经验证伪，已降级至补充材料（SI），本文件不予形式化。下面形式化的第 (iii) 条
+保留于正文。
+
+这里证明该离散流的三个可机器检查的定性性质（这就是论文
+proof sketch 引用的更新规则的全部离散动力学内容）：
+* 单纯形内部不变：权重严格为正 ⇒ 更新后严格为正；
+* 不动点：等分（等损失）时两专家赔率不变；
+* 单调性：得分更高（损失更低）的专家赔率严格上升。
+============================================================ -/
+
+/-- **Proposition P5(iii-a)（内部不变性）**：乘性更新保持权重严格为正。 -/
+theorem hedge_step_pos {w s : Nat} (hw : 0 < w) (hs : 0 < s) :
+    0 < w * s := Nat.mul_pos hw hs
+
+/-- **Proposition P5(iii-b)（不动点）**：两位专家得分相同时，
+    更新后的赔率 w'ᵢ/w'ⱼ 等于更新前的赔率（交叉相乘形式）。 -/
+theorem hedge_odds_fixed {wG wB s : Nat} :
+    wG * s * wB = wG * wB * s := by
+  rw [Nat.mul_assoc, Nat.mul_comm s wB, ← Nat.mul_assoc]
+
+/-- **Proposition P5(iii-c)（赔率改进，弱版）**：得分不劣的专家
+    在更新后赔率不下降（交叉相乘形式）。 -/
+theorem hedge_odds_improve {wG wB sG sB : Nat} (h : sB ≤ sG) :
+    wG * wB * sB ≤ wG * sG * wB := by
+  have h1 : wG * wB * sB ≤ wG * wB * sG := Nat.mul_le_mul_left _ h
+  have h2 : wG * wB * sG = wG * sG * wB := by
+    rw [Nat.mul_assoc, Nat.mul_comm wB sG, ← Nat.mul_assoc]
+  rw [h2] at h1
+  exact h1
+
+/-- **Proposition P5(iii-c')（赔率改进，严格版）**：得分严格更高的专家
+    （损失严格更低）更新后赔率严格上升。 -/
+theorem hedge_odds_improve_strict {wG wB sG sB : Nat}
+    (hwG : 0 < wG) (hwB : 0 < wB) (h : sB < sG) :
+    wG * wB * sB < wG * sG * wB := by
+  have h1 : wG * wB * (sB + 1) ≤ wG * wB * sG := Nat.mul_le_mul_left _ h
+  have h2 : wG * wB * (sB + 1) = wG * wB * sB + wG * wB := by
+    rw [Nat.left_distrib, Nat.mul_one]
+  rw [h2] at h1
+  have h3 : wG * wB * sB < wG * wB * sB + wG * wB := by
+    have hpos : 0 < wG * wB := Nat.mul_pos hwG hwB
+    omega
+  have h4 : wG * wB * sB < wG * wB * sG := Nat.lt_of_lt_of_le h3 h1
+  have h5 : wG * wB * sG = wG * sG * wB := by
+    rw [Nat.mul_assoc, Nat.mul_comm wB sG, ← Nat.mul_assoc]
+  rw [h5] at h4
+  exact h4
+
+/-! ============================================================
+## Conjecture C1（归因–干预秩一致性）—— 已证伪
+
+论文陈述（v3 新增）：按归因分数对专家/窗口排序应与按实际干预效果排序一致
+（Spearman 秩一致）。
+
+经验状态（v3 修订）：**已证伪**——归因排序与干预效果排序之间的实测 Spearman
+秩相关为 ρ = −0.105（不存在正秩一致）。该猜想在此仅以 `def` 形式记录其陈述：
+不是定理、不声称证明；本文件仍然不含 `sorry`、不含公理。
+============================================================ -/
+
+/-- **Conjecture C1（归因–干预秩一致性），仅陈述，未断言。**
+
+对 `n` 个对象，若对象 `i` 的归因分数不高于对象 `j`，则其干预效果也不高于
+`j`（单调秩一致——正 Spearman 秩相关的定性内容）。
+
+经验状态：**已证伪**（Spearman ρ = −0.105）。本谓词仅记录在案；
+本项目不对其作任何真理性断言。 -/
+def attributionInterventionRankConsistent {n : Nat}
+    (attributionScore interventionEffect : Fin n → Int) : Prop :=
+  ∀ i j : Fin n, attributionScore i ≤ attributionScore j →
+    interventionEffect i ≤ interventionEffect j
+
+/-! =======
+全部 5 个命题（P1–P5，P5 仅第 (iii) 条）的内核均已闭合证明：无 sorry、无公理、
+无 import；Conjecture C1 仅以陈述形式记录。
+在 https://lean.math.hhu.de 中整页粘贴即可通过检查。
+============================================================ -/

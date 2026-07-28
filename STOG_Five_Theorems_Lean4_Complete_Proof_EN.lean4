@@ -1,0 +1,375 @@
+/-!
+# Lean 4 Formalization of the Five Propositions in the STOG–MetaMorph Paper (v3 revision)
+## (Pure Lean 4 core, no Mathlib, adapted to https://lean.math.hhu.de)
+
+This file does not need to `import` anything: it introduces no axioms, uses no `sorry`, and all proofs are closed.
+
+## v3 revision note
+
+In paper v3, "Theorem 1–5" were renamed **Proposition P1–P5** with explicit assumption sets.
+This file aligns all docstring/comment naming with that convention (Lean declaration names are
+unchanged for compatibility). Empirical-status annotations from the v3 revision:
+
+* **P4 (gating optimality / amplitude-driven benefit)**: the qualified form was falsified
+  empirically under amplitude-balanced conditions (E4 v4: oracle benefit 0.61 → 0.007 after the
+  amplitude ratio was balanced to 1.026; the v3 benefit was entirely driven by a 6.53× amplitude
+  gap). The discrete kernel proved here does not depend on the amplitude hypothesis; the
+  amplitude-related assumption is recorded explicitly in the P4 section header.
+* **P5 geometric sub-clauses (paper 5a/5b)**: falsified empirically and demoted to Supplementary
+  Information. This file formalizes only clause (iii) (Hedge / natural-gradient dynamics), which
+  is retained in the main text.
+* **Conjecture C1 (attribution–intervention rank consistency)**: newly added in v3 and falsified
+  empirically (Spearman ρ = −0.105). Recorded at the end of this file as a statement only
+  (a `def`, not a theorem — no proof is claimed and no `sorry` is introduced).
+
+## Scope note
+
+The full analytic statements of the five paper propositions involve spectral measures, Parseval's identity, Toeplitz eigenvalue
+interlacing, influence-function calculus, and natural-gradient flow under the Shahshahani metric. These objects do not exist
+in Lean 4 core (core does not even have real numbers ℝ), and they cannot be written directly in that online environment.
+
+Therefore this file formalizes the **mathematical kernel that actually carries the proof burden in each proof sketch**:
+
+* P1  pairwise orthogonality ⇒ additivity of energy ("noise cross-terms vanish by orthogonality")
+* P2  monotone spectral weighting ⇒ contraction of the condition number, and the contraction strengthens as the spectral decay exponent increases
+* P3  the influence function of a raw linear readout is unbounded, whereas Huber/median-type aggregators have bounded influence functions
+* P4  the Bayes gate is optimal; the excess risk of an implementable gate = number of misallocated windows × risk gap
+* P5  positivity, fixed-point property, and odds improvement of multiplicative weight updates
+      (the Euler discretization of natural-gradient flow on the simplex)
+-/
+
+/-! ============================================================
+## Proposition P1 (formerly Theorem 1): Spectral operator risk decomposition
+
+Paper statement:
+R(m, ω) = σ² + ∫|H*−H_m|² dS_ω + estimation-error term.
+
+Key step in the proof sketch:
+Expand the squared loss and use Parseval; noise cross-terms vanish by orthogonality.
+
+Here we prove the same deductive step over an axiomatic inner-product structure:
+whenever the mismatch component m, noise component n, and estimation-error component e are pairwise orthogonal,
+the total risk energy decomposes strictly additively. This is the entire algebraic content of
+"orthogonality ⇒ risk decomposition".
+============================================================ -/
+
+/-- Axiomatic inner-product structure: the proof of P1 needs only two inner-product laws. -/
+structure InnerSpace where
+  Carrier : Type
+  add : Carrier → Carrier → Carrier
+  inner : Carrier → Carrier → Int
+  inner_add_left : ∀ u v w, inner (add u v) w = inner u w + inner v w
+  inner_symm : ∀ u v, inner u v = inner v u
+
+namespace InnerSpace
+
+variable (V : InnerSpace)
+
+/-- Right additivity: derived from left additivity and symmetry. -/
+theorem inner_add_right (u v w : V.Carrier) :
+    V.inner u (V.add v w) = V.inner u v + V.inner u w := by
+  rw [V.inner_symm u (V.add v w), V.inner_add_left v w u,
+      V.inner_symm v u, V.inner_symm w u]
+
+/-- Energy (squared norm): the spectral energy of each risk term in the paper. -/
+def energy (u : V.Carrier) : Int := V.inner u u
+
+/-- Pythagorean theorem: orthogonality ⇒ additivity of energy.
+
+Corresponds to the step in the proof of P1 where "cross-terms vanish by orthogonality". -/
+theorem pythagoras {u w : V.Carrier} (h : V.inner u w = 0) :
+    energy V (V.add u w) = energy V u + energy V w := by
+  have h' : V.inner w u = 0 := by rw [V.inner_symm w u, h]
+  show V.inner (V.add u w) (V.add u w) = V.inner u u + V.inner w w
+  rw [V.inner_add_left u w (V.add u w),
+      V.inner_add_right u u w, V.inner_add_right w u w, h, h']
+  omega
+
+/-- **Algebraic kernel of Proposition P1 (risk decomposition).**
+
+When the mismatch m (playing the role of ∫|H*−H_m|²dS), the noise n (playing the role of σ²),
+and the estimation error e are pairwise orthogonal, the total risk equals the sum of the three energies. -/
+theorem risk_decomposition {m n e : V.Carrier}
+    (hmn : V.inner m n = 0) (hme : V.inner m e = 0) (hne : V.inner n e = 0) :
+    energy V (V.add (V.add m n) e)
+    = energy V m + energy V n + energy V e := by
+  have h1 : V.inner (V.add m n) e = 0 := by
+    rw [V.inner_add_left m n e, hme, hne]; omega
+  rw [pythagoras V h1, pythagoras V hmn]
+
+end InnerSpace
+
+/-- A one-dimensional concrete model (signals are integers, inner product is multiplication):
+shows that the above axioms are consistent (a model exists). -/
+def intLine : InnerSpace where
+  Carrier := Int
+  add u v := u + v
+  inner u v := u * v
+  inner_add_left u v w := Int.add_mul u v w
+  inner_symm u v := Int.mul_comm u v
+
+/-- Sanity check on the concrete model: energy is self-multiplication. -/
+example (u : Int) : InnerSpace.energy intLine u = u * u := rfl
+
+/-! ==================================
+## Proposition P2 (formerly Theorem 2): Condition-number regularization
+
+Paper statement:
+First-order differencing reweights the spectrum by ω ↦ |1−e^{−iω}|²,
+and this weight increases monotonically with frequency; a decaying spectrum concentrates large eigenvalues at low frequencies,
+so large eigenvalues receive the smallest weight, the condition number decreases, and the reduction grows with decay exponent α.
+
+Algebraic kernel (cross-multiplied form, avoiding division):
+if λmax ≥ λmin > 0 are the extreme eigenvalues in the definition of the condition number,
+and the weights satisfy wLow ≤ wHigh (small weight at low frequency, large weight at high frequency), then
+
+κ' = (λmax·wLow)/(λmin·wHigh) ≤ λmax/λmin = κ,
+
+and cross-multiplication gives
+
+λmax·wLow·λmin ≤ λmax·λmin·wHigh.
+========================================================= -/
+
+/-- **Proposition P2 (condition-number contraction)**: differencing-based reweighting contracts the condition ratio. -/
+theorem differencing_contracts_condition_ratio
+    {lambdaMax lambdaMin wLow wHigh : Nat}
+    (_horder : lambdaMin ≤ lambdaMax) (hweights : wLow ≤ wHigh) :
+    lambdaMax * wLow * lambdaMin ≤ lambdaMax * lambdaMin * wHigh := by
+  calc lambdaMax * wLow * lambdaMin
+      = lambdaMax * lambdaMin * wLow := by
+        rw [Nat.mul_assoc, Nat.mul_comm wLow lambdaMin, ← Nat.mul_assoc]
+    _ ≤ lambdaMax * lambdaMin * wHigh := Nat.mul_le_mul_left _ hweights
+
+/-- **Proposition P2 (contraction grows with α)**: the steeper the spectral decay (the smaller the low-frequency weight wLow),
+the stronger the contraction. Corresponds to "the reduction grows with the decay exponent" in the paper. -/
+theorem contraction_grows_with_decay
+    {lambdaMax lambdaMin wLow wLow' : Nat}
+    (h : wLow' ≤ wLow) :
+    lambdaMax * wLow' * lambdaMin ≤ lambdaMax * wLow * lambdaMin := by
+  have h1 : wLow' * lambdaMin ≤ wLow * lambdaMin :=
+    Nat.mul_le_mul_right _ h
+  have h2 : lambdaMax * (wLow' * lambdaMin)
+      ≤ lambdaMax * (wLow * lambdaMin) := Nat.mul_le_mul_left _ h1
+  calc lambdaMax * wLow' * lambdaMin
+      = lambdaMax * (wLow' * lambdaMin) := Nat.mul_assoc _ _ _
+    _ ≤ lambdaMax * (wLow * lambdaMin) := h2
+    _ = lambdaMax * wLow * lambdaMin := (Nat.mul_assoc _ _ _).symm
+
+/-- **Proposition P2 (strict version)**: when the weights are strictly monotone and the eigenvalues are positive,
+the condition ratio contracts strictly. -/
+theorem differencing_strictly_contracts
+    {lambdaMax lambdaMin wLow wHigh : Nat}
+    (hmax : 0 < lambdaMax) (hmin : 0 < lambdaMin)
+    (hweights : wLow < wHigh) :
+    lambdaMax * lambdaMin * wLow < lambdaMax * lambdaMin * wHigh := by
+  have h1 : lambdaMax * lambdaMin * (wLow + 1)
+      ≤ lambdaMax * lambdaMin * wHigh := Nat.mul_le_mul_left _ hweights
+  have h2 : lambdaMax * lambdaMin * (wLow + 1)
+      = lambdaMax * lambdaMin * wLow + lambdaMax * lambdaMin := by
+        rw [Nat.left_distrib, Nat.mul_one]
+  rw [h2] at h1
+  have h3 : lambdaMax * lambdaMin * wLow
+      < lambdaMax * lambdaMin * wLow + lambdaMax * lambdaMin := by
+        have hpos : 0 < lambdaMax * lambdaMin := Nat.mul_pos hmax hmin
+        omega
+  exact Nat.lt_of_lt_of_le h3 h1
+
+/-! ==============================================
+## Proposition P3 (formerly Theorem 3): Robust sufficient statistics
+
+Paper statement:
+Under an ε-contaminated observation law, the influence function (IF) of a raw linear readout is unbounded
+in spike amplitude A; the IFs of median, Huber, quantile, and median-of-means aggregators are bounded.
+
+Here we prove this contrast directly over Int (the IF definitions are exactly those in the paper).
+
+Note: Lean 4 core has no `|x|` notation, so "bounded" is always stated with the two-sided bound `−k ≤ · ≤ k`:
+
+* rawIF x = x            —— unbounded;
+* huberIF k x = max(−k, min(k, x)) —— globally bounded by ±k;
+* med3 (median-of-three) —— bounded by the sample minimum/maximum.
+========================================================= -/
+
+/-- Influence function of the raw linear readout: the identity map. -/
+def rawIF (x : Int) : Int := x
+
+/-- Influence function of a Huber-type aggregator: truncated at ±k. -/
+def huberIF (k : Int) (x : Int) : Int := max (-k) (min k x)
+
+/-- Median-of-three (a minimal instance of median/quantile-type aggregation). -/
+def med3 (a b c : Int) : Int := max (min a b) (min (max a b) c)
+
+/-- **Proposition P3(a)**: the IF of the raw readout has no upper bound — any bound B is exceeded. -/
+theorem rawIF_unbounded_above (B : Int) : ∃ x : Int, B < rawIF x :=
+  ⟨B + 1, by show B < B + 1; omega⟩
+
+/-- **Proposition P3(a')**: the IF of the raw readout has no lower bound. -/
+theorem rawIF_unbounded_below (B : Int) : ∃ x : Int, rawIF x < B :=
+  ⟨B - 1, by show B - 1 < B; omega⟩
+
+/-- **Proposition P3(b)**: the Huber-type IF is globally bounded (two-sided bound form). -/
+theorem huberIF_bounded {k : Int} (hk : 0 ≤ k) (x : Int) :
+    -k ≤ huberIF k x ∧ huberIF k x ≤ k := by
+  show -k ≤ max (-k) (min k x) ∧ max (-k) (min k x) ≤ k; omega
+
+/-- **Proposition P3(c)**: saturation — a spike with amplitude A ≥ k is read exactly as k.
+
+That is, no matter how large the contamination amplitude is, the influence no longer grows. -/
+theorem huberIF_saturates {k : Int} (hk : 0 ≤ k) (A : Int) (hA : k ≤ A) :
+    huberIF k A = k := by
+  show max (-k) (min k A) = k; omega
+
+/-- **Proposition P3(d)**: median-type aggregation is bounded by the sample minimum/maximum
+(another form of bounded IF). -/
+theorem med3_bounded (a b c : Int) :
+    min (min a b) c ≤ med3 a b c ∧ med3 a b c ≤ max (max a b) c := by
+  show min (min a b) c ≤ max (min a b) (min (max a b) c)
+    ∧ max (min a b) (min (max a b) c) ≤ max (max a b) c; omega
+
+/-- **Proposition P3 (quantitative contrast form)**: no matter how large the bound B is,
+there is always a spike amplitude such that the raw readout exceeds the bound,
+while the Huber readout remains within the bound. -/
+theorem robust_vs_raw (B k : Int) (hk : 0 ≤ k) :
+    ∃ A : Int, B < rawIF A ∧ -k ≤ huberIF k A ∧ huberIF k A ≤ k := by
+  refine ⟨max (B + 1) k, ?_, huberIF_bounded hk _⟩
+  show B < max (B + 1) k; omega
+
+/-! ====================================================
+## Proposition P4 (formerly Theorem 4): Regime separability and gating optimality
+
+Paper statement:
+Under the **amplitude-balance assumption** (both regimes contribute comparably to the loss),
+the Bayes gate is the optimal expert choice under the regime posterior;
+the excess risk paid by any implementable gate is controlled by misallocation rate × maximum between-expert risk gap.
+
+**Empirical status (v3 revision)**: the qualified (amplitude-driven benefit) form of P4 was
+falsified empirically under amplitude-balanced conditions (E4 v4: oracle benefit 0.61 → 0.007
+after the amplitude ratio was balanced to 1.026; the v3 benefit was entirely driven by a 6.53×
+amplitude gap). The discrete kernel proved below is independent of the amplitude hypothesis and
+remains mathematically valid; the formal statement retains its hypotheses explicitly.
+
+Discrete kernel (correct + mis windows, optimal risk rBest per window,
+each misallocated window pays an extra gap):
+
+* Bayes-gate optimality: assigning every window to the low-risk expert is no worse than any other assignment;
+* excess-risk identity: the excess is exactly mis·gap;
+* hence excess ≤ (correct+mis)·gap, i.e. "excess / total ≤ gap" (cross-multiplied form).
+========================================================== -/
+
+/-- **Proposition P4(a) (Bayes gate optimality)**: assigning by lowest risk is no worse than
+any assignment that misassigns mis windows to a higher-risk expert. -/
+theorem bayes_gate_optimal {correct mis rBest rOther : Nat}
+    (h : rBest ≤ rOther) :
+    correct * rBest + mis * rBest
+    ≤ correct * rBest + mis * rOther :=
+  Nat.add_le_add_left (Nat.mul_le_mul_left _ h) _
+
+/-- **Proposition P4(b) (excess-risk identity)**: total risk of an implementable gate
+= Bayes total risk + mis·gap, term by term equal, with no hidden approximation. -/
+theorem gating_excess_risk (correct mis rBest gap : Nat) :
+    correct * rBest + mis * (rBest + gap)
+    = (correct + mis) * rBest + mis * gap := by
+  rw [Nat.left_distrib, Nat.right_distrib]; omega
+
+/-- **Proposition P4(c) (excess-risk upper bound)**: the excess risk mis·gap does not exceed
+total number of windows × gap — the cross-multiplied form of the paper's "excess risk ≤ overlap × ΔR". -/
+theorem excess_le_overlap_mul_gap (correct mis gap : Nat) :
+    mis * gap ≤ (correct + mis) * gap := by
+  rw [Nat.right_distrib]; exact Nat.le_add_left _ _
+
+/-- **Proposition P4 (combined form)**: total risk of any implementable gate
+≤ Bayes total risk + total number of windows × gap. -/
+theorem implementable_gate_bound (correct mis rBest gap : Nat) :
+    correct * rBest + mis * (rBest + gap)
+    ≤ (correct + mis) * rBest + (correct + mis) * gap := by
+  rw [gating_excess_risk, Nat.right_distrib correct mis gap]
+  exact Nat.add_le_add_left (Nat.le_add_left _ _) _
+
+/-! =============================================
+## Proposition P5 (formerly Theorem 5): Function-space atlas and fusion geometry — clause (iii) only
+
+Paper statement (clause (iii), retained in the v3 main text):
+Weight adaptation is the natural-gradient flow of cumulative loss on the probability simplex,
+and its Euler discretization is exactly the exponentially weighted (Hedge / multiplicative weight) update w ↦ w·s.
+
+**Empirical status (v3 revision)**: the geometric sub-clauses of P5 (paper 5a/5b — atlas and
+fusion-geometry claims) were falsified empirically and demoted to Supplementary Information;
+they are NOT formalized in this file. Clause (iii), formalized below, is retained in the main text.
+
+Here we prove three machine-checkable qualitative properties of this discrete flow
+(this is the entire discrete dynamical content of the update rule cited in the proof sketch):
+
+* interior invariance: strictly positive weights ⇒ strictly positive after the update;
+* fixed point: when the scores are equal (equal losses), the odds between two experts do not change;
+* monotonicity: the odds of an expert with a higher score (lower loss) strictly increase.
+============================================= -/
+
+/-- **Proposition P5(iii-a) (interior invariance)**: multiplicative updates keep weights strictly positive. -/
+theorem hedge_step_pos {w s : Nat} (hw : 0 < w) (hs : 0 < s) :
+    0 < w * s := Nat.mul_pos hw hs
+
+/-- **Proposition P5(iii-b) (fixed point)**: when two experts have the same score,
+the updated odds w'ᵢ/w'ⱼ equal the previous odds (cross-multiplied form). -/
+theorem hedge_odds_fixed {wG wB s : Nat} :
+    wG * s * wB = wG * wB * s := by
+  rw [Nat.mul_assoc, Nat.mul_comm s wB, ← Nat.mul_assoc]
+
+/-- **Proposition P5(iii-c) (odds improvement, weak version)**: an expert whose score is no worse
+does not have decreased odds after the update (cross-multiplied form). -/
+theorem hedge_odds_improve {wG wB sG sB : Nat} (h : sB ≤ sG) :
+    wG * wB * sB ≤ wG * sG * wB := by
+  have h1 : wG * wB * sB ≤ wG * wB * sG := Nat.mul_le_mul_left _ h
+  have h2 : wG * wB * sG = wG * sG * wB := by
+    rw [Nat.mul_assoc, Nat.mul_comm wB sG, ← Nat.mul_assoc]
+  rw [h2] at h1
+  exact h1
+
+/-- **Proposition P5(iii-c') (odds improvement, strict version)**: an expert with a strictly higher score
+(strictly lower loss) has strictly increased odds after the update. -/
+theorem hedge_odds_improve_strict {wG wB sG sB : Nat}
+    (hwG : 0 < wG) (hwB : 0 < wB) (h : sB < sG) :
+    wG * wB * sB < wG * sG * wB := by
+  have h1 : wG * wB * (sB + 1) ≤ wG * wB * sG := Nat.mul_le_mul_left _ h
+  have h2 : wG * wB * (sB + 1) = wG * wB * sB + wG * wB := by
+    rw [Nat.left_distrib, Nat.mul_one]
+  rw [h2] at h1
+  have h3 : wG * wB * sB < wG * wB * sB + wG * wB := by
+    have hpos : 0 < wG * wB := Nat.mul_pos hwG hwB
+    omega
+  have h4 : wG * wB * sB < wG * wB * sG := Nat.lt_of_lt_of_le h3 h1
+  have h5 : wG * wB * sG = wG * sG * wB := by
+    rw [Nat.mul_assoc, Nat.mul_comm wB sG, ← Nat.mul_assoc]
+  rw [h5] at h4
+  exact h4
+
+/-! =====================================
+## Conjecture C1 (Attribution–Intervention Rank Consistency) — FALSIFIED
+
+Paper statement (new in v3): ranking experts/windows by attribution score should coincide
+with ranking by actual intervention effect (Spearman rank consistency).
+
+Empirical status (v3 revision): **FALSIFIED** — the measured Spearman rank correlation between
+the attribution ranking and the intervention-effect ranking is ρ = −0.105 (no positive rank
+consistency). The conjecture is recorded here as a *statement only*: it is deliberately stated
+as a `def`, not as a `theorem` — no proof is claimed, and this file still contains no `sorry`
+and no axioms.
+================================================= -/
+
+/-- **Conjecture C1 (attribution–intervention rank consistency), statement only.**
+
+For `n` items, if item `i` has an attribution score no greater than item `j`,
+then its intervention effect is also no greater (monotone rank agreement —
+the qualitative content of positive Spearman rank correlation).
+
+Empirical status: **falsified** (Spearman ρ = −0.105).
+This predicate is recorded for the record only; the project does not assert it. -/
+def attributionInterventionRankConsistent {n : Nat}
+    (attributionScore interventionEffect : Fin n → Int) : Prop :=
+  ∀ i j : Fin n, attributionScore i ≤ attributionScore j →
+    interventionEffect i ≤ interventionEffect j
+
+/-! =========================================
+The kernels of all five propositions (P1–P5, clause (iii) for P5) have been proved in closed
+form: no sorry, no axioms, no imports. Conjecture C1 is recorded as a statement only.
+Paste the whole file into https://lean.math.hhu.de and it should pass checking.
+========================================================= -/
