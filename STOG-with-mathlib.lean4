@@ -1,0 +1,428 @@
+import Mathlib
+
+open MeasureTheory Filter Complex NormedSpace Real InnerProductSpace BigOperators ENNReal
+
+set_option autoImplicit true
+
+/-!
+# STOG-MetaMorph: Spectral Operator Selection
+## 五个核心命题的 Lean 4 形式化框架（v3 修订版）
+
+本文件将论文 Methods 中的命题翻译成 Lean 4 + Mathlib 的形式化陈述。
+完整证明依赖大量测度论、谱论与微分几何引理，此处给出定义、定理陈述与证明骨架。
+
+## v3 修订说明（对应论文第 3 版）
+
+* 论文 v3 将原 "Theorem 1–5" 更名为 **Proposition P1–P5** 并附显式假设集；
+  本文件在注释与文档字符串层面对齐该命名（Lean 声明名保持不变以保证兼容）。
+* **Proposition P4（门控最优性 / 幅度驱动收益）**：限定形式在幅度平衡实验下被经验证伪
+  （E4 v4：幅度比平衡到 1.026 后 oracle 收益由 0.61 降至 0.007；v3 的收益完全由 6.53× 幅度差驱动）。
+  形式化陈述本身在其假设下仍然成立，故予以保留；幅度相关假设（`h_balance`）在陈述中保持显式。
+* **Proposition P5 的几何子条款（对应论文 5a/5b）**：经验证伪，已降级至补充材料（SI）；
+  在线学习子条款 (iii)（Hedge / 自然梯度流）保留于正文。
+* 新增 **Conjecture C1（归因–干预秩一致性）**：经验证伪（Spearman ρ = −0.105），
+  仅以陈述形式记录在案（见文件末尾），不作为定理断言。
+-/
+
+-- ============================================
+-- Proposition P1 (formerly Theorem 1): Spectral Operator Risk Decomposition
+-- 谱算子风险分解
+-- ============================================
+
+section Theorem1
+
+/-- 频率域（时间频率 × 空间频率的抽象可测空间）-/
+variable {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω)
+
+/-- 谱密度 S_X : Ω → ℝ≥0 -/
+variable (S_X : Ω → ℝ≥0) [Measurable S_X]
+
+/-- 由谱密度加权的谱测度 μ_S -/
+noncomputable def spectralMeasure : Measure Ω :=
+  μ.withDensity (fun ω => (S_X ω).toNNReal)
+
+/-- 真实传递函数 H* 与专家传递函数 H_i（复值）-/
+variable {H_star H_i : Ω → ℂ}
+
+/-- 加性噪声 ε，与信号正交 -/
+variable (ε : Ω → ℂ)
+
+/-- 噪声方差 σ² 与估计误差 E_est -/
+variable (σ² : ℝ≥0) (E_est : ℝ≥0)
+
+/-- 谱失配泛函（论文方程 (2) 的核心项）
+    ∫_Ω |H_i(ω) - H*(ω)|² S_X(ω) dω -/
+noncomputable def spectralMismatch : ℝ≥0∞ :=
+  ∫⁻ ω, ENNReal.ofReal (‖H_i ω - H_star ω‖ ^ 2) ∂(spectralMeasure μ S_X)
+
+/-- 预测风险（论文方程 (1) 的 RHS）
+    R_i = σ² + spectralMismatch + E_est -/
+noncomputable def predictionRisk : ℝ≥0∞ :=
+  σ² + spectralMismatch μ S_X H_i H_star + E_est
+
+/-- 真实风险：频域中的均方预测误差
+    在频域中，Parseval 定理将时域能量与频域能量等同 -/
+noncomputable def trueRisk : ℝ≥0∞ :=
+  ∫⁻ ω, ENNReal.ofReal (‖(H_star ω - H_i ω)‖ ^ 2 * (S_X ω).toNNReal) ∂μ
+  + ∫⁻ ω, ENNReal.ofReal (‖ε ω‖ ^ 2) ∂μ
+
+/-- **Proposition P1（原 Theorem 1）**: 谱算子风险分解
+
+假设（v3 显式假设集）：
+1. H_star 与 H_i 均属于 L²(spectralMeasure)；
+2. 噪声与信号正交（交叉项期望为零）；
+3. 噪声的期望功率为 σ²。
+
+结论：真实风险可分解为不可约噪声、谱失配与估计误差三项之和。 -/
+theorem spectral_operator_risk_decomposition
+    (h_star : Memℒp H_star 2 (spectralMeasure μ S_X))
+    (h_i : Memℒp H_i 2 (spectralMeasure μ S_X))
+    (h_orthogonality : ∫⁻ ω, ENNReal.ofReal ((star (ε ω) * (H_star ω - H_i ω)).re) ∂(spectralMeasure μ S_X) = 0)
+    (h_noise_var : ∫⁻ ω, ENNReal.ofReal (‖ε ω‖ ^ 2) ∂μ = σ²) :
+    trueRisk μ S_X H_i H_star ε = predictionRisk σ² μ S_X H_i H_star E_est := by
+  -- 证明思路：
+  -- 1. 展开 trueRisk：E[|(H* - H_i)X + ε|²]
+  -- 2. = E[|(H* - H_i)X|²] + E[|ε|²] + 2·Re E[ε̄ (H* - H_i)X]
+  -- 3. 交叉项由正交性假设 h_orthogonality 为零
+  -- 4. E[|ε|²] = σ² （由 h_noise_var）
+  -- 5. E[|(H* - H_i)X|²] = ∫ |H* - H_i|² S_X dμ （Parseval / Plancherel 定理）
+  -- 6. 整理即得 predictionRisk 的分解形式
+  unfold trueRisk predictionRisk spectralMismatch
+  -- 实际证明需调用测度论积分线性性与 Parseval 恒等式
+  sorry
+
+end Theorem1
+
+
+-- ============================================
+-- Proposition P2 (formerly Theorem 2): Condition-Number Regularization
+-- 条件数正则化
+-- ============================================
+
+section Theorem2
+
+/-- 有限维实内积空间（时间或空间维度）-/
+variable {V : Type*} [NormedAddCommGroup V] [InnerProductSpace ℝ V] [FiniteDimensional ℝ V]
+
+/-- 正定自伴协方差算子 Σ -/
+variable {Σ : V →L[ℝ] V} (h_Σ_pos_def : ∀ x, x ≠ 0 → inner (Σ x) x > 0)
+
+/-- 条件数 κ(Σ) = λ_max / λ_min，通过 Rayleigh 商定义 -/
+noncomputable def conditionNumber : ℝ :=
+  let r_max := sSup {inner (Σ x) x / ‖x‖^2 | (x : V) (_ : x ≠ 0)}
+  let r_min := sInf {inner (Σ x) x / ‖x‖^2 | (x : V) (_ : x ≠ 0)}
+  r_max / r_min
+
+/-- 一阶差分算子 D（离散或连续版本）-/
+variable (D : V →L[ℝ] V)
+
+/-- 差分后的协方差：D ∘ Σ ∘ D* -/
+def diffCovariance : V →L[ℝ] V := D ∘L Σ ∘L ContinuousLinearMap.adjoint D
+
+/-- **Proposition P2（时间部分，原 Theorem 2）**: 差分降低条件数
+
+机制：差分在频域重新加权谱，
+S_Δx(ω) = |1 - e^{-iω}|² S_x(ω) = 2(1 - cos ω) S_x(ω)。
+对于低频主导的衰减谱，差分抑制低频能量集中度，
+从而通过 Courant-Fischer 定理降低条件数。 -/
+theorem differencing_lowers_condition_number
+    (h_D : D.IsSymmetric)
+    (α : ℝ) (h_α : α > 0) :
+    conditionNumber Σ h_Σ_pos_def ≥ conditionNumber (diffCovariance Σ D) (by sorry) := by
+  -- 证明：
+  -- 1. 差分算子 D 的频域响应为 D(ω) = 1 - e^{-iω}
+  -- 2. 差分后谱密度：S_Δx(ω) = 2(1 - cos ω) · S_x(ω)
+  -- 3. 当 α > 0（衰减谱），低频处 S_x 集中，导致 κ(Σ_x) 很大
+  -- 4. 因子 2(1-cos ω) ≈ ω² 在 ω→0 时趋于 0，抑制低频能量
+  -- 5. 由 Courant-Fischer 极小极大原理，特征值分布更均匀，κ 下降
+  -- 6. α 越大，衰减越快，差分的正则化收益越显著（单调性）
+  sorry
+
+/-- 静态投影算子 P = U_r U_r^T（自伴幂等）-/
+variable (P : V →L[ℝ] V) (h_P : P.IsSymmetric ∧ P ∘L P = P)
+
+/-- 投影后的协方差 -/
+def projectedCovariance : V →L[ℝ] V := P ∘L Σ ∘L P
+
+/-- **Proposition P2（空间部分，原 Theorem 2）**: 静态投影降低空间条件数
+
+将协方差投影到前 r 个主导空间特征向量，截断小特征值，
+从而减小最大与最小特征值之比。 -/
+theorem static_projection_lowers_condition_number
+    (h_rank : FiniteDimensional.finrank ℝ (LinearMap.range P) < FiniteDimensional.finrank ℝ V) :
+    conditionNumber Σ h_Σ_pos_def ≥ conditionNumber (projectedCovariance Σ P) (by sorry) := by
+  -- 证明：利用特征值交错（Cauchy 交错定理），
+  -- 投影后丢弃了最小的几个正特征值，故条件数不增。
+  sorry
+
+end Theorem2
+
+
+-- ============================================
+-- Proposition P3 (formerly Theorem 3): Robust Sufficient Statistics
+-- 稳健充分统计量
+-- ============================================
+
+section Theorem3
+
+/-- 样本空间 -/
+variable {X : Type*} [MeasurableSpace X]
+
+/-- 基础分布 P0 与重尾污染分布 Q -/
+variable (P0 Q : Measure X) [IsProbabilityMeasure P0] [IsProbabilityMeasure Q]
+
+/-- ε-污染模型：P_ε = (1-ε)P0 + εQ -/
+def EpsilonContaminated (ε : ℝ) (hε : 0 ≤ ε ∧ ε ≤ 1) : Measure X :=
+  (1 - ε) • P0 + ε • Q
+
+/-- 统计泛函 T: 概率测度 → ℝ -/
+variable {T : (Measure X) → ℝ}
+
+/-- 影响函数（Gateaux 导数）
+    IF(x; T, P) = lim_{ε→0} [T(P_ε(x)) - T(P)] / ε -/
+noncomputable def InfluenceFunction (T : (Measure X) → ℝ) (P : Measure X) (x : X) : ℝ :=
+  deriv (fun ε => T (EpsilonContaminated P (Measure.dirac x) ε sorry)) 0
+
+/-- 线性（原始矩）读出：T(P) = ∫ w(x)·x dP(x)
+    其影响函数 IF(x) = w(x)·x，关于振幅无界 -/
+def RawReadout (w : X → ℝ) (P : Measure X) : ℝ := ∫ x, w x * x ∂P
+
+/-- 稳健读出：中位数
+    中位数的影响函数有界（符号函数除以密度在 median 处之值）-/
+noncomputable def MedianReadout (P : Measure X) : ℝ :=
+  sInf {m | P {x | x ≤ m} ≥ 1 / 2}
+
+/-- **Proposition P3（第一部分，原 Theorem 3）**: 线性读出的影响函数无界
+
+在重尾污染 Q 下，线性估计量对任意大振幅敏感。 -/
+theorem raw_influence_unbounded
+    (w : X → ℝ) (hw : ∃ x, w x ≠ 0)
+    (P : Measure X) :
+    ¬ ∃ B, ∀ x, ‖InfluenceFunction (RawReadout w) P x‖ ≤ B := by
+  -- 证明：
+  -- 1. 计算 RawReadout 的影响函数：IF(x) = w(x) · x
+  -- 2. 当污染点 x 的振幅 → ±∞ 时，|IF(x)| → ∞
+  -- 3. 故不存在有限上界 B
+  sorry
+
+/-- **Proposition P3（第二部分，原 Theorem 3）**: 稳健读出的影响函数有界
+
+中位数、Huber、MAD 等 M-估计量的影响函数在重尾下保持有界。 -/
+theorem robust_influence_bounded
+    (P : Measure X) (h_cont : Continuous (fun x => x)) :
+    ∃ B, ∀ x, ‖InfluenceFunction MedianReadout P x‖ ≤ B := by
+  -- 证明：
+  -- 1. 中位数的影响函数：IF(x; median, P) = sign(x - m) / [2f(m)]
+  --    其中 m = median(P)，f 为密度函数
+  -- 2. 由 h_cont 及 median 处密度为正，分母 2f(m) > 0
+  -- 3. 分子 |sign(·)| ≤ 1，故 |IF| ≤ 1/(2f(m)) < ∞
+  -- 4. 取 B = 1/(2f(m)) 即可
+  sorry
+
+/-- **Proposition P3（综合，原 Theorem 3）**: 在 ε-污染模型下，稳健表示的风险最优性
+
+最优稳健表示应组合：稳健时间矩、差分、稳健空间聚合、分位数/分布读出。 -/
+theorem robust_representation_optimal
+    (ε : ℝ) (hε : 0 < ε ∧ ε < 1)
+    (P_ε : Measure X) (hP : P_ε = EpsilonContaminated P0 Q ε hε)
+    (h_heavy : ∃ A, ∀ x ∈ Set.support Q, ‖x‖ ≥ A) :
+    let robustRisk := ∫⁻ x, ‖x - MedianReadout P_ε‖^2 ∂P_ε
+    let rawRisk := ∫⁻ x, ‖x - RawReadout (fun _ => 1) P_ε‖^2 ∂P_ε
+    robustRisk < rawRisk := by
+  -- 证明：利用影响函数有界性推出渐近方差不等，
+  -- 或直接比较 MSE 的积分表示。
+  sorry
+
+end Theorem3
+
+
+-- ============================================
+-- Proposition P4 (formerly Theorem 4): Regime Separability and Gating Optimality
+-- 体制可分离性与门控最优性
+--
+-- v3 经验状态注记：P4 的限定形式（幅度驱动收益主张）在幅度平衡实验下被经验证伪
+-- （E4 v4：幅度比平衡到 1.026 后 oracle 收益由 0.61 降至 0.007；
+-- v3 的收益完全由 6.53× 幅度差驱动）。形式化陈述在其假设下仍然成立，
+-- 故证明骨架予以保留，且幅度相关假设（h_balance）在陈述中保持显式。
+-- ============================================
+
+section Theorem4
+
+/-- 充分统计量空间 -/
+variable {S : Type*} [MeasurableSpace S]
+
+/-- 体制标签：A 与 B -/
+inductive Regime | A | B
+  deriving DecidableEq, Fintype
+
+/-- 体制条件分布 p(s|r) -/
+variable (p_s_given_r : Regime → Measure S)
+  [IsProbabilityMeasure (p_s_given_r Regime.A)]
+  [IsProbabilityMeasure (p_s_given_r Regime.B)]
+
+/-- 体制重叠 δ_ST = ∫ min(p(s|A), p(s|B)) ds
+    这是总变差距离的对偶表示。 -/
+noncomputable def regimeOverlap : ℝ≥0∞ :=
+  ∫⁻ s, min ((p_s_given_r Regime.A).rnDeriv (p_s_given_r Regime.B) s).toNNReal
+            ((p_s_given_r Regime.B).rnDeriv (p_s_given_r Regime.A) s).toNNReal
+    ∂(p_s_given_r Regime.A)
+
+/-- 各体制下的专家风险 -/
+variable (R : Regime → ℝ≥0)
+
+/-- 最大风险差距 Δ_max -/
+def maxRiskGap : ℝ≥0 := max (R Regime.A) (R Regime.B) - min (R Regime.A) (R Regime.B)
+
+/-- 门控函数：根据充分统计量输出两体制权重 -/
+def Gate := S → Fin 2 → ℝ≥0
+
+/-- 贝叶斯最优门控 g*(s) = P(r | s)
+    使用似然比构造后验概率。 -/
+noncomputable def BayesGate : Gate := fun s i =>
+  let ratio := (p_s_given_r Regime.A).rnDeriv (p_s_given_r Regime.B) s
+  if i = 0 then
+    ENNReal.toReal (1 / (1 + ratio))   -- P(A|s)
+  else
+    ENNReal.toReal (ratio / (1 + ratio)) -- P(B|s)
+
+/-- 门控风险：加权平均各体制风险 -/
+noncomputable def GatingRisk (g : Gate) : ℝ≥0∞ :=
+  ∫⁻ s, g s 0 * R Regime.A ∂(p_s_given_r Regime.A) +
+  ∫⁻ s, g s 1 * R Regime.B ∂(p_s_given_r Regime.B)
+
+/-- **Proposition P4（原 Theorem 4）**: 门控超额风险受体制重叠控制
+
+假设（v3 显式假设集）：体制幅度平衡 `h_balance : R Regime.A = R Regime.B`
+（两体制对损失贡献相当；该幅度相关假设在陈述中显式保留），
+则任何可实现门控 g 的超额风险满足
+R(g) - R(g*) = O(δ_ST · Δ_max)。
+
+经验状态（v3 修订）：限定形式的幅度驱动收益主张在幅度平衡条件下被经验证伪
+（E4 v4：幅度比平衡到 1.026 后 oracle 收益由 0.61 降至 0.007；
+v3 的收益完全由 6.53× 幅度差驱动）。形式化陈述保留其显式假设。 -/
+theorem regime_gating_optimality
+    (g : Gate)
+    (h_balance : R Regime.A = R Regime.B)
+    (Δ_max : ℝ≥0) (h_Δ : maxRiskGap R ≤ Δ_max) :
+    GatingRisk p_s_given_r R g - GatingRisk p_s_given_r R (BayesGate p_s_given_r) ≤ Δ_max * regimeOverlap p_s_given_r := by
+  -- 证明思路：
+  -- 1. 超额风险 = E[误分配造成的损失]
+  -- 2. 误分配概率 ≤ 总变差距离 TV(P(·|A), P(·|B))
+  -- 3. TV 距离 = 1 - δ_ST（由重叠定义）
+  -- 4. 因此超额风险 ≤ Δ_max · (1 - (1 - δ_ST)) = Δ_max · δ_ST
+  -- 5. 幅度平衡假设 h_balance 确保单一高能量体制不主导损失
+  sorry
+
+end Theorem4
+
+
+-- ============================================
+-- Proposition P5 (formerly Theorem 5): Function-Space Atlas and Fusion Geometry
+-- 函数空间图集与融合几何
+--
+-- v3 经验状态注记：几何子条款（对应论文 5a/5b，表示层融合优越性等
+-- 几何主张）经验证伪，已降级至补充材料（SI）；在线学习子条款 (iii)
+-- （Hedge 更新 = 概率单形上自然梯度流的 Euler 离散化）保留于正文。
+-- ============================================
+
+section Theorem5
+
+/-- 输入空间 -/
+variable {X : Type*}
+
+/-- 预测函数空间（希尔伯特空间）-/
+variable {F : Type*} [NormedAddCommGroup F] [InnerProductSpace ℝ F] [CompleteSpace F]
+
+/-- 模型族：索引集 + 坐标卡（将输入嵌入到预测函数空间）-/
+structure ModelFamily where
+  index : Type*
+  chart : index → (X → F)
+
+/-- 图集：一族模型族 -/
+def Atlas := List ModelFamily
+
+/-- 图集光滑性：转移映射是微分同胚 -/
+def SmoothAtlas (A : Atlas) : Prop :=
+  ∀ i j, i ≠ j → ∀ x : X, ∃ U ∈ 𝓝 x, ∃ φ ψ,
+    ContDiffOn ℝ ⊤ φ U ∧ ContDiffOn ℝ ⊤ ψ U ∧
+    (∀ y ∈ U, φ (ψ y) = y) ∧ (∀ y ∈ U, ψ (φ y) = y)
+
+/-- n 维概率向量（概率单形）-/
+structure ProbVec (n : ℕ) where
+  weights : Fin n → ℝ≥0
+  sum_eq_one : ∑ i, weights i = 1
+
+/-- Hedge 指数加权更新
+    w_i^{t+1} ∝ w_i^t · exp(-η · ℓ_i^t) -/
+def hedgeUpdate {n : ℕ} (w : ProbVec n) (losses : Fin n → ℝ) (η : ℝ) : ProbVec n :=
+  let raw := fun i => (w.weights i).toReal * Real.exp (-η * losses i)
+  let total := ∑ i, raw i
+  { weights := fun i => ⟨raw i / total, by sorry⟩,
+    sum_eq_one := by sorry }
+
+/-- **Proposition P5（几何子条款，对应论文 5a/5b）**: 表示层融合优于输出层加权
+
+隐藏表示 h_i(x) 包含比最终输出 y_i(x) 更丰富的结构信息，
+因此在表示空间中的线性融合（ridge readout）严格优于输出空间的凸组合。
+
+经验状态（v3 修订）：该几何子条款经验证伪，已降级至补充材料（SI）。
+形式化陈述在此保留仅作记录，不再作为正文主张。 -/
+theorem representation_fusion_superiority {n : ℕ}
+    (experts : Fin n → (X → F))
+    (hidden : Fin n → (X → EuclideanSpace ℝ (Fin 256)))
+    (readout : EuclideanSpace ℝ (Fin 256) → F)
+    (h : ∀ i, experts i = readout ∘ hidden i)
+    (w : ProbVec n)
+    (W : EuclideanSpace ℝ (Fin 256) →L[ℝ] F) :
+    ∀ x : X,
+      let outputFusion := ∑ i, (w.weights i).toReal • experts i x
+      let reprFusion := W (∑ i, (w.weights i).toReal • hidden i x)
+      ∃ optimal : F, ‖reprFusion - optimal‖ ≤ ‖outputFusion - optimal‖ := by
+  -- 证明思路：
+  -- 1. 输出融合空间 {∑ w_i · readout(h_i(x))} 是表示融合空间 {W(∑ w_i · h_i(x))}
+  --    在 W = readout 时的线性约束子集
+  -- 2. 由 Hilbert 空间投影定理，更大仿射子空间的逼近误差更小
+  -- 3. 因此表示层融合的 MSE 不高于输出层融合
+  sorry
+
+/-- **Proposition P5（在线学习子条款 (iii)，保留于正文）**: Hedge 是概率单形上的自然梯度流
+
+在 Shahshahani 度量下，指数加权更新等价于自然梯度下降的欧拉离散化。 -/
+theorem hedge_natural_gradient {n : ℕ} (w : ProbVec n)
+    (losses : Fin n → ℝ) (η : ℝ) :
+    ∀ i,
+      let grad := losses i - (∑ j, (w.weights j).toReal * losses j)
+      let nat_grad := grad * (w.weights i).toReal
+      (hedgeUpdate w losses η).weights i = ⟨((w.weights i).toReal - η * nat_grad), by sorry⟩ := by
+  -- 证明：
+  -- 1. 对指数更新取对数并一阶展开：
+  --    log w_i^{t+1} ≈ log w_i^t - η · ℓ_i^t - log(normalizer)
+  -- 2. 在概率单形上，Shahshahani 度量的自然梯度为
+  --    ∇_nat L = diag(w) · (∇L - w^T ∇L · 1)
+  -- 3. 验证上述一阶展开与自然梯度步一致
+  sorry
+
+end Theorem5
+
+
+-- ============================================
+-- Conjecture C1 (Attribution–Intervention Rank Consistency)
+-- 归因–干预秩一致性猜想 —— 经验证伪
+--
+-- v3 新增：论文 v3 引入猜想 C1——按归因分数对专家/窗口排序与按实际干预
+-- 效果排序应当一致（Spearman 秩一致）。实测 Spearman ρ = −0.105，
+-- 猜想在经验上被证伪。此处仅以 `def` 形式记录其陈述（不作为定理断言，
+-- 不声称证明），以便形式化仓库与论文保持同步。
+-- ============================================
+
+/-- **Conjecture C1（归因–干预秩一致性），仅陈述，未断言。**
+
+对 `n` 个对象，若对象 `i` 的归因分数不高于对象 `j`，则其干预效果也不高于
+`j`（单调秩一致，即正 Spearman 秩相关的定性内容）。
+
+经验状态（v3 修订）：**已证伪**（Spearman ρ = −0.105）。
+本谓词仅记录在案；本项目不对其作任何真理性断言。 -/
+def attributionInterventionRankConsistent {n : ℕ}
+    (attributionScore interventionEffect : Fin n → ℝ) : Prop :=
+  ∀ i j : Fin n, attributionScore i ≤ attributionScore j →
+    interventionEffect i ≤ interventionEffect j

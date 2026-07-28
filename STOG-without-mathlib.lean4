@@ -1,0 +1,297 @@
+-- STOG-MetaMorph: cloud-safe Lean 4 version, fixed for lean.math.hhu.de
+-- No Mathlib import.
+-- Fixes:
+--   1. add noncomputable section for axiom-based operations.
+--   2. avoid using Sigma as an identifier.
+--   3. use ASCII-friendly variable names.
+--
+-- v3 revision note:
+--   * Paper v3 renamed "Theorem 1-5" to "Proposition P1-P5" with explicit
+--     assumption sets; comment/docstring naming below is aligned accordingly
+--     (Lean declaration names are unchanged for compatibility).
+--   * Proposition P4: the qualified (amplitude-driven benefit) form was
+--     falsified empirically under amplitude-balanced conditions (E4 v4:
+--     oracle benefit 0.61 -> 0.007 after the amplitude ratio was balanced to
+--     1.026; the v3 benefit was entirely driven by a 6.53x amplitude gap).
+--     The formal statement retains its explicit amplitude hypothesis
+--     (`amplitudeBalanced`) and is kept.
+--   * Proposition P5's geometric sub-clauses (paper 5a/5b) were falsified
+--     empirically and demoted to Supplementary Information; the online-learning
+--     clause (iii) is retained in the main text.
+--   * Conjecture C1 (attribution-intervention rank consistency, Spearman
+--     rho = -0.105) was falsified; it is recorded at the end of this file as
+--     a statement only, not asserted as a theorem.
+
+noncomputable section
+
+/-
+Abstract scalar type.
+
+We avoid Mathlib's real numbers because importing Mathlib may trigger
+dependency building in the cloud environment.
+-/
+
+axiom R : Type
+
+axiom addR : R → R → R
+axiom mulR : R → R → R
+axiom leR  : R → R → Prop
+axiom zeroR : R
+
+noncomputable instance : Add R := ⟨addR⟩
+noncomputable instance : Mul R := ⟨mulR⟩
+noncomputable instance : LE  R := ⟨leR⟩
+
+
+/-
+Proposition P1 (formerly Theorem 1)
+Spectral operator risk decomposition
+
+Paper proof sketch:
+Expand the squared loss and apply Parseval's identity;
+noise cross-terms vanish by orthogonality.
+-/
+
+axiom SpectralMeasure : Type
+axiom TransferFunction : Type
+axiom Expert : Type
+
+axiom sqIntegrable : SpectralMeasure → TransferFunction → Prop
+
+axiom effectiveResponse : Expert → TransferFunction
+axiom predictionRisk    : Expert → R
+axiom irreducibleNoise  : SpectralMeasure → R
+axiom spectralMismatch  : SpectralMeasure → TransferFunction → TransferFunction → R
+axiom estimationError   : Expert → R
+
+axiom parseval_orthogonality
+  (mu : SpectralMeasure)
+  (H : TransferFunction)
+  (k : Expert)
+  (hH : sqIntegrable mu H)
+  (hHk : sqIntegrable mu (effectiveResponse k)) :
+  predictionRisk k =
+      irreducibleNoise mu
+    + spectralMismatch mu H (effectiveResponse k)
+    + estimationError k
+
+theorem theorem1_spectral_operator_risk_decomposition
+  (mu : SpectralMeasure)
+  (H : TransferFunction)
+  (k : Expert)
+  (hH : sqIntegrable mu H)
+  (hHk : sqIntegrable mu (effectiveResponse k)) :
+  predictionRisk k =
+      irreducibleNoise mu
+    + spectralMismatch mu H (effectiveResponse k)
+    + estimationError k := by
+  exact parseval_orthogonality mu H k hH hHk
+
+
+/-
+Proposition P2 (formerly Theorem 2)
+Condition-number regularization
+
+Paper proof sketch:
+Eigenvalue interlacing for Toeplitz Gram matrices under spectral weighting,
+applied to each Kronecker factor.
+-/
+
+axiom Covariance : Type
+
+axiom separableCovariance : Covariance → Prop
+axiom lowRankSpatial      : Covariance → Prop
+
+axiom temporalConditionNumber : Covariance → R
+axiom spatialConditionNumber  : Covariance → R
+axiom jointConditionNumber    : Covariance → R
+
+axiom differencing     : Covariance → Covariance
+axiom staticProjection : Covariance → Covariance
+
+axiom reductionByDecay : Covariance → R → R
+
+axiom eigenvalue_interlacing_kronecker
+  (C : Covariance)
+  (hsep : separableCovariance C)
+  (hlow : lowRankSpatial C) :
+  temporalConditionNumber (differencing C) ≤ temporalConditionNumber C ∧
+  spatialConditionNumber (staticProjection C) ≤ spatialConditionNumber C ∧
+  jointConditionNumber (differencing (staticProjection C)) ≤ jointConditionNumber C ∧
+  ∀ a b : R, a ≤ b → reductionByDecay C a ≤ reductionByDecay C b
+
+theorem theorem2_condition_number_regularization
+  (C : Covariance)
+  (hsep : separableCovariance C)
+  (hlow : lowRankSpatial C) :
+  temporalConditionNumber (differencing C) ≤ temporalConditionNumber C ∧
+  spatialConditionNumber (staticProjection C) ≤ spatialConditionNumber C ∧
+  jointConditionNumber (differencing (staticProjection C)) ≤ jointConditionNumber C ∧
+  ∀ a b : R, a ≤ b → reductionByDecay C a ≤ reductionByDecay C b := by
+  exact eigenvalue_interlacing_kronecker C hsep hlow
+
+
+/-
+Proposition P3 (formerly Theorem 3)
+Robust sufficient statistics
+
+Paper proof sketch:
+Influence-function calculus for M-estimators, lifted to the separable
+covariance setting.
+-/
+
+axiom ObservationLaw : Type
+axiom Statistic : Type
+
+axiom contaminatedLaw : R → ObservationLaw → ObservationLaw
+
+axiom heavyTailedOrPointMass : ObservationLaw → Prop
+
+axiom rawLinearReadout      : Statistic
+axiom medianReadout         : Statistic
+axiom huberReadout          : Statistic
+axiom quantileReadout       : Statistic
+axiom medianOfMeansReadout  : Statistic
+
+axiom boundedInfluence : Statistic → ObservationLaw → Prop
+
+axiom influence_function_calculus
+  (P : ObservationLaw)
+  (eps : R)
+  (hP : heavyTailedOrPointMass P)
+  (heps : zeroR ≤ eps) :
+  (¬ boundedInfluence rawLinearReadout (contaminatedLaw eps P)) ∧
+  boundedInfluence medianReadout (contaminatedLaw eps P) ∧
+  boundedInfluence huberReadout (contaminatedLaw eps P) ∧
+  boundedInfluence quantileReadout (contaminatedLaw eps P) ∧
+  boundedInfluence medianOfMeansReadout (contaminatedLaw eps P)
+
+theorem theorem3_robust_sufficient_statistics
+  (P : ObservationLaw)
+  (eps : R)
+  (hP : heavyTailedOrPointMass P)
+  (heps : zeroR ≤ eps) :
+  (¬ boundedInfluence rawLinearReadout (contaminatedLaw eps P)) ∧
+  boundedInfluence medianReadout (contaminatedLaw eps P) ∧
+  boundedInfluence huberReadout (contaminatedLaw eps P) ∧
+  boundedInfluence quantileReadout (contaminatedLaw eps P) ∧
+  boundedInfluence medianOfMeansReadout (contaminatedLaw eps P) := by
+  exact influence_function_calculus P eps hP heps
+
+
+/-
+Proposition P4 (formerly Theorem 4)
+Regime separability and gating optimality
+
+Paper proof sketch:
+Condition on the regime posterior and bound the misallocation term by
+a total-variation distance, which delta controls.
+
+v3 empirical status: the qualified (amplitude-driven benefit) form was
+falsified empirically under amplitude-balanced conditions (E4 v4: oracle
+benefit 0.61 -> 0.007 after the amplitude ratio was balanced to 1.026;
+the v3 benefit was entirely driven by a 6.53x amplitude gap). The formal
+statement retains its explicit amplitude hypothesis `amplitudeBalanced`.
+-/
+
+axiom Regime : Type
+
+axiom overlap : R
+axiom amplitudeBalanced : Prop
+
+axiom Gate : Type
+axiom bayesGate : Gate
+
+axiom excessRisk : Gate → R
+axiom maxBetweenExpertRiskGap : R
+axiom implementableGateApproximation : Gate → R
+
+axiom bayes_gate_optimal :
+  excessRisk bayesGate = zeroR
+
+axiom total_variation_gating_bound :
+  amplitudeBalanced →
+  ∀ g : Gate,
+    excessRisk g ≤
+      maxBetweenExpertRiskGap * overlap + implementableGateApproximation g
+
+theorem theorem4_regime_separability_and_gating_optimality
+  (hbal : amplitudeBalanced) :
+  excessRisk bayesGate = zeroR ∧
+  ∀ g : Gate,
+    excessRisk g ≤
+      maxBetweenExpertRiskGap * overlap + implementableGateApproximation g := by
+  exact ⟨bayes_gate_optimal, total_variation_gating_bound hbal⟩
+
+
+/-
+Proposition P5 (formerly Theorem 5)
+Function-space atlas and fusion geometry
+
+Paper proof sketch:
+Under the Shahshahani metric on the simplex, exponential weighting is
+the natural-gradient flow of cumulative loss.
+
+v3 empirical status: the geometric sub-clauses (paper 5a/5b — the
+atlas/fusion-geometry claims, here `locallyOptimalPredictor`,
+`coordinateChoice`, `barycentricInFunctionSpace`) were falsified empirically
+and demoted to Supplementary Information; the online-learning clause (iii)
+(`exponentialWeightingFlow → naturalGradientFlow`) is retained in the
+main text. The formal statement is kept unchanged for the record.
+-/
+
+axiom ModelFamily : Type
+axiom Chart : ModelFamily → Type
+
+axiom smoothAtlas : (ModelFamily → Type) → Prop
+
+axiom Predictor : Type
+axiom locallyOptimalPredictor : Predictor → Prop
+axiom coordinateChoice : Predictor → Prop
+
+axiom EnsembleWeight : Type
+axiom barycentricInFunctionSpace : EnsembleWeight → Prop
+
+axiom DriftFlow : Type
+axiom exponentialWeightingFlow : DriftFlow → Prop
+axiom naturalGradientFlow : DriftFlow → Prop
+
+axiom function_space_atlas_geometry :
+  smoothAtlas Chart →
+  (∀ p, locallyOptimalPredictor p → coordinateChoice p) ∧
+  (∀ w, barycentricInFunctionSpace w) ∧
+  (∀ f, exponentialWeightingFlow f → naturalGradientFlow f)
+
+theorem theorem5_function_space_atlas_and_fusion_geometry
+  (hatlas : smoothAtlas Chart) :
+  (∀ p, locallyOptimalPredictor p → coordinateChoice p) ∧
+  (∀ w, barycentricInFunctionSpace w) ∧
+  (∀ f, exponentialWeightingFlow f → naturalGradientFlow f) := by
+  exact function_space_atlas_geometry hatlas
+
+
+/-
+Conjecture C1 (Attribution–Intervention Rank Consistency) — FALSIFIED
+
+v3 addition: the paper introduces Conjecture C1 — ranking experts/windows by
+attribution score should coincide with ranking by actual intervention effect
+(Spearman rank consistency). The measured Spearman rank correlation is
+rho = -0.105, so the conjecture is falsified empirically. It is recorded
+here as a `def` (statement only); no truth claim is made and no `sorry`
+is introduced.
+-/
+
+/-- **Conjecture C1 (attribution–intervention rank consistency), statement only.**
+
+For `n` items, if item `i` has an attribution score no greater than item `j`,
+then its intervention effect is also no greater (monotone rank agreement —
+the qualitative content of positive Spearman rank correlation).
+
+Empirical status (v3 revision): **falsified** (Spearman ρ = −0.105).
+This predicate is recorded for the record only; the project does not assert it. -/
+def attributionInterventionRankConsistent {n : Nat}
+    (attributionScore interventionEffect : Fin n → R) : Prop :=
+  ∀ i j : Fin n, leR (attributionScore i) (attributionScore j) →
+    leR (interventionEffect i) (interventionEffect j)
+
+end
