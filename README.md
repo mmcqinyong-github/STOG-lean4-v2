@@ -11,10 +11,15 @@ This is a revised copy of `STOG-lean4`; the original is left untouched.
 | `STOG_Five_Theorems_Lean4_Complete_Proof_CN.lean4` | Same as above, Chinese. |
 | `STOG-with-mathlib.lean4` | Full analytic statements in Lean 4 + Mathlib (definitions + statement skeletons). Contains `sorry` placeholders — proof sketches only, not closed proofs. Chinese. |
 | `STOG-without-mathlib.lean4` | Cloud-safe axiom-based version (abstract scalar type, axioms for the analytic content). English comments. |
+| **`STOG_Formal_v4.lean`** | **v4-final: the single authoritative Mathlib file. Compiles clean — 0 error, 0 warning, 0 `sorry`, 0 axiom.** See `CHANGELOG-v4.md`. |
+| `CHANGELOG-v4.md` | Item-by-item disposition of the 15 `sorry` placeholders plus the full log of the ~40 real type errors fixed to reach a clean build. |
 
-There is no Lake project (no `lakefile` / `lean-toolchain`); the two `Complete_Proof`
-files are self-contained and designed to be pasted into an online Lean 4 environment
-(e.g. https://lean.math.hhu.de).
+There is no Lake project for the four `.lean4` files (no `lakefile` /
+`lean-toolchain`); those are self-contained and designed to be pasted into an
+online Lean 4 environment (e.g. https://lean.math.hhu.de). `STOG_Formal_v4.lean`
+imports `Mathlib`, so it needs a real toolchain (or the online Mathlab-enabled
+playground that ships Mathlib); a Lake project for it lives in the companion
+directory `lean-build/` (`lakefile.toml`, `lean-toolchain`, `Stog/Basic.lean`).
 
 ## Mapping: paper (v3) ↔ Lean declarations
 
@@ -61,8 +66,33 @@ files are self-contained and designed to be pasted into an online Lean 4 environ
 
 ## Verification status
 
-No Lean toolchain was available on the machine used for this revision, so the files
-were **not** recompiled. Changes were restricted to comments, docstrings, section
-headers, and one new `def` per file (no proof code was altered); all edits were
-syntax-reviewed by hand. The complete-proof files were already verified in an online
-Lean 4 environment before this revision and their proof code is unchanged.
+**Updated 2026-10-06.** `STOG_Formal_v4.lean` has now been compiled with a real
+toolchain on the authoring machine:
+
+| Item | Value |
+|---|---|
+| Lean | `leanprover/lean4:v4.35.0-rc3` (installed via elan) |
+| Mathlib | pinned to `c20717eaa791af9dd3f7847f5ba91623bda9ab6b` |
+| Build | `lake build Stog` → `Build completed successfully (9019 jobs)` |
+| Output | **0 error, 0 warning, 0 `sorry`, 0 `admit`, 0 `axiom`, 0 `unsafe`** |
+
+Reproduce with:
+
+```bash
+cd lean-build
+lake build Stog          # authoritative; pulls the olean cache on first run
+```
+
+or, for faster iteration during editing:
+
+```bash
+export LEAN_PATH=".lake/packages/batteries/.lake/build/lib/lean:\
+.lake/packages/mathlib/.lake/build/lib/lean:.lake/build/lib/lean"
+lean Stog/Basic.lean
+```
+
+The four `.lean4` files were **not** recompiled with the toolchain — they use the
+`.lean4` extension for the online playground and are not part of the Lake project.
+Their proof code is unchanged from the previously verified versions; the v3 revision
+touched only comments, docstrings, section headers and one new `def` per file, and
+all edits were syntax-reviewed by hand.

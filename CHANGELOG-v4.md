@@ -46,8 +46,71 @@ proof skeletons）。v4 之后，论文中相应表述建议更新为：
   的同一惯例处理——这是形式化仓库自身的诚实性纪律，与论文"预注册命题 + 显式假设集 +
   证伪如实报告"的方法论一致。
 
+## v4-final（2026-10-06 晚）：从"骨架"到**真编译通过**
+
+上一版 v4 文件声称"0 sorry、0 错误"，但实际上并未在 Lean 中编译过。本轮在
+本机搭建完整工具链后逐条修复，**真实编译通过**。
+
+### 环境（实测）
+
+| 项 | 值 |
+|---|---|
+| Lean 工具链 | `leanprover/lean4:v4.35.0-rc3`（elan 安装） |
+| Mathlib | `git#c20717eaa791af9dd3f7847f5ba91623bda9ab6b` |
+| 构建 | `lake build Stog` → **Build completed successfully (9019 jobs)** |
+| 缓存 | olean 缓存 4.3 GB / 5,744 个 olean；mathlib 全量 8,594 个 |
+| 结果 | **0 error、0 warning、0 sorry、0 axiom、0 admit** |
+
+权威文件：`STOG_Formal_v4.lean`（607 行，由 `lean-build/Stog/Basic.lean` 同步）。
+
+### 修复清单（除 sorry 之外的真实类型错误，共 ~40 处）
+
+语言/记号层：
+
+1. `ℝ≥0` / `ℝ≥0∞` 记号未激活 → 一律改写字面类型 `NNReal` / `ENNReal`；
+2. 文档注释 `/-- -/` 不能置于 `variable` 之前 → 改为 `--` 行注释；
+3. `Σ` 是求和记号的保留 token，不能作绑定名 → 改名 `Sigma`；
+4. `∘L` 不存在 → 用 `.comp`；
+5. section variable 造成的隐式参数漂移 → 全部定义改为显式参数。
+
+数学库 API 层：
+
+6. `Memℒp` → 正确名 `MemLp`；
+7. `integrable_dirac` 需 `‖f a‖ₑ < ∞` → 用 `enorm_lt_top`；
+8. `Integrable.smul_measure` 需 `c ≠ ∞` → `ENNReal.ofReal_ne_top`；
+9. `Integrable.add_measure` → `integral_add_measure`；
+10. `P.IsSymmetric` 不存在 → 删除该假设；
+11. `inner` 缺标量参数、证明里绑定集合 → 改为在 `{x // x ≠ 0}` 上取 `Set.range`；
+12. `deriving Fintype` 对含测度字段的结构体不良定 → 手写 `Fintype` 实例；
+13. `h_dh.congr` / `hquot.congr` 方法不存在 → `HasDerivWithinAt.congr`、
+    `HasDerivAt.congr_of_eventuallyEq`；
+14. `HasDerivAt.div` 分母为 `^2` → 相应调整值等式；
+15. `hasDerivAt_iff_tendsto_slope.mpr` → `.mp`；`slope` → `slope_fun_def_field`；
+16. 缺 `open scoped Topology` → 补上（否则 `𝓝` 无法解析）；
+17. `ProbVec` 由 `NNReal` 权重改为 `ℝ` 权重 + `nonneg` 字段，`Gate` 改为 `ℝ` 值，
+    消除大量强制转换摩擦；
+18. **`HasDerivAt.add` 生成的是函数逐点相加 `f + g`，与目标 lambda
+    `fun ε => a + ε·c` 不可化简相等** → 改用 `HasDerivAt.const_add`
+    （它直接生成 lambda 形式）。这是最后一个错误，也是本次修复的关键点。
+
+代码质量：
+
+19. 消除 linter 告警：未使用变量 `E_est` → `_E_est`；`push_neg` 已弃用 → `push Not`。
+
+### 验证方式（可复现）
+
+```bash
+# 方式一：lake（权威，首次需拉取 olean 缓存）
+cd lean-build && lake build Stog
+
+# 方式二：直接调用 lean（增量迭代更快）
+export LEAN_PATH=".lake/packages/*/.lake/build/lib/lean:.lake/build/lib/lean"
+lean Stog/Basic.lean
+```
+
 ## GitHub 推送状态
 
 本地提交已完成。远程 `https://github.com/mmcqinyong-github/STOG-lean4-v2.git` 的推送
-需要凭据（本机无 SSH 密钥、无 gh CLI），请仓库所有者在本地执行
-`git push origin master` 或提供凭据。
+需要凭据（本机无 SSH 密钥、无 gh CLI；且当前网络代理屏蔽 git/HTTPS 端点、
+所提供的 PAT 返回 401 Bad credentials），请仓库所有者在本地执行
+`git push origin master` 或提供有效凭据。
